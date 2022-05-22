@@ -5,7 +5,8 @@ const sgTransport = require('nodemailer-sendgrid-transport');
 const app = express();
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const port = process.env.PORT || 5000;
 
 app.use(cors());
@@ -66,6 +67,39 @@ function sendAppointmentEmail(booking) {
             console.log('Message sent: ', info);
         }
     });
+};
+
+
+function sendPaymentConfirmationEmail(booking) {
+    const { patient, patientName, treatment, date, slot } = booking;
+
+    var email = {
+        from: process.env.EMAIL_SENDER,
+        to: patient,
+        subject: `We have received your payment for ${treatment} is on ${date} at ${slot}`,
+        text: `Your payment for this appointment ${treatment} is on ${date} at ${slot} is confirmed`,
+        html: `
+        <div>
+            <p>Hello ${patientName},</p>
+            <h3>Thank you for your payment.</h3>
+            <h3>We have received your payment.</h3>
+            <p>Looking forward to seeing you on ${date} at ${slot}.</p>
+            <h3>Our Address: </h3>
+            <h3>Andor Killa Bandorban</h3>
+            <p>Bangladesh</p>
+            <a href="https://web.programming-hero.com/">unsubscribe</a>
+        </div>
+        `
+    };
+
+    emailClient.sendMail(email, function (err, info) {
+        if (err) {
+            console.log(err);
+        }
+        else {
+            console.log('Message sent: ', info);
+        }
+    });
 }
 
 //find multiple doc
@@ -76,6 +110,7 @@ async function run() {
         const bookingCollection = client.db("doctors_portal").collection("bookings");
         const userCollection = client.db("doctors_portal").collection("user");
         const doctorCollection = client.db("doctors_portal").collection("doctors");
+        const paymentCollection = client.db("doctors_portal").collection("payments");
 
         const verifyAdmin = async (req, res, next) => {
             const requester = req.decoded.email;
@@ -86,7 +121,19 @@ async function run() {
             else {
                 res.status(403).send({ message: 'Forbidden Access' });
             }
-        }
+        };
+
+        app.post('/create-payment-intent', verifyJWT, async (req, res) => {
+            const service = req.body;
+            const price = service.price;
+            const amount = price * 100;
+            const paymentIntent = await stripe.paymentIntents.create({
+                amount: amount,
+                currency: 'usd',
+                payment_method_types: ['card']
+            });
+            res.send({ clientSecret: paymentIntent.client_secret })
+        });
 
         app.get('/service', async (req, res) => {
             const query = {};
@@ -188,6 +235,28 @@ async function run() {
             }
         });
 
+        app.patch('/booking/:id', verifyJWT, async (req, res) => {
+            const id = req.params.id;
+            const payment = req.body;
+            const filter = { _id: ObjectId(id) };
+            const updateDoc = {
+                $set: {
+                    paid: true,
+                    transactionId: payment.transactionId
+                }
+            }
+            const result = await paymentCollection.insertOne(payment);
+            const updatedBooking = await bookingCollection.updateOne(filter, updateDoc);
+            res.send(updateDoc);
+        })
+
+        app.get('/booking/:id', verifyJWT, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: ObjectId(id) };
+            const booking = await bookingCollection.findOne(query);
+            res.send(booking);
+        });
+
         app.post('/booking', async (req, res) => {
             const booking = req.body;
             const query = { treatment: booking.treatment, date: booking.date, patient: booking.patient };
@@ -204,7 +273,7 @@ async function run() {
         app.get('/doctor', verifyJWT, verifyAdmin, async (req, res) => {
             const doctors = await doctorCollection.find().toArray();
             res.send(doctors);
-        })
+        });
 
         app.post('/doctor', verifyJWT, verifyAdmin, async (req, res) => {
             const doctor = req.body;
